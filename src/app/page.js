@@ -8,6 +8,7 @@ import MemTableVisualizer from "../components/MemTableVisualizer";
 import LevelVisualizer from "../components/LevelVisualizer";
 import LogPanel from "../components/LogPanel";
 import PerformanceMetrics from "../components/PerformanceMetrics";
+import { useLSMPersistence } from "../utils/persistence";
 import {
   TOMBSTONE,
   MEMTABLE_DEFAULT_MAX_SIZE,
@@ -30,23 +31,49 @@ const App = () => {
     []
   );
 
-  const [lsmTreeInstance, setLsmTreeInstance] = useState(
-    () => new LSMTree(initialLSMConfig)
-  );
-  const [treeState, setTreeState] = useState(lsmTreeInstance.getState());
+  // Initialize persistence hook
+  const { loadPersistedState, saveState, clearPersistedState } = useLSMPersistence(initialLSMConfig);
+
+  // State initialization
+  const [isClient, setIsClient] = useState(false);
+  const [lsmTreeInstance, setLsmTreeInstance] = useState(() => new LSMTree(initialLSMConfig));
+  const [treeState, setTreeState] = useState(() => lsmTreeInstance.getState());
   const [isCompacting, setIsCompacting] = useState(false);
-  const [readValue, setReadValue] = useState(null); // Stores { value, path }
-  const [readPath, setReadPath] = useState([]); // Stores the path array from readValue for highlighting
+  const [readValue, setReadValue] = useState(null);
+  const [readPath, setReadPath] = useState([]);
+
+  // Effect to handle client-side initialization
+  useEffect(() => {
+    if (!isClient) {
+      setIsClient(true);
+      const persistedState = loadPersistedState();
+      
+      if (persistedState.config) {
+        const newInstance = new LSMTree(persistedState.config);
+        setLsmTreeInstance(newInstance);
+        setTreeState(persistedState.treeState || newInstance.getState());
+      }
+      if (persistedState.readValue) {
+        setReadValue(persistedState.readValue);
+      }
+      if (persistedState.readPath) {
+        setReadPath(persistedState.readPath);
+      }
+    }
+  }, [isClient, loadPersistedState]);
+
+  // Effect to save state to localStorage whenever relevant state changes
+  useEffect(() => {
+    if (isClient) {
+      saveState(lsmTreeInstance.config, treeState, readValue, readPath);
+    }
+  }, [treeState, readValue, readPath, lsmTreeInstance.config, saveState, isClient]);
 
   // Callback to update UI state from LSMTree instance
   const updateState = useCallback(() => {
-    setTreeState(lsmTreeInstance.getState());
+    const newState = lsmTreeInstance.getState();
+    setTreeState(newState);
   }, [lsmTreeInstance]);
-
-  // Effect to update state if lsmTreeInstance changes (e.g. after reset with new config)
-  useEffect(() => {
-    updateState();
-  }, [lsmTreeInstance, updateState]);
 
   const handleWrite = (key, value) => {
     lsmTreeInstance.put(key, value);
@@ -65,13 +92,12 @@ const App = () => {
   const handleRead = (key) => {
     const result = lsmTreeInstance.get(key);
     setReadValue(result);
-    setReadPath(result.path || []); // Update readPath specifically for highlighting
-    updateState(); // This will also update logs
+    setReadPath(result.path || []);
+    updateState();
   };
 
   const handleCompact = async (level = 0) => {
     setIsCompacting(true);
-    // Small delay to allow UI to update if needed, though compaction is synchronous here
     await new Promise((resolve) => setTimeout(resolve, 50));
     lsmTreeInstance.compact(level);
     updateState();
@@ -80,19 +106,18 @@ const App = () => {
     setReadPath([]);
   };
 
-  // Resets the tree with current or new configuration
   const handleResetTree = (newConfigParams) => {
-    const configToUse = newConfigParams || lsmTreeInstance.config; // Use provided or existing config
-    // Create a new instance to ensure a full reset, or call a more thorough reset on existing
-    setLsmTreeInstance(new LSMTree(configToUse));
-    // State will be updated by useEffect on lsmTreeInstance change
+    const configToUse = newConfigParams || lsmTreeInstance.config;
+    const newInstance = new LSMTree(configToUse);
+    setLsmTreeInstance(newInstance);
+    setTreeState(newInstance.getState());
     setReadValue(null);
     setReadPath([]);
+    clearPersistedState();
   };
 
-  // Specifically for saving settings from the SettingsPanel
   const handleSaveSettings = (newConfig) => {
-    handleResetTree(newConfig); // This will create a new LSMTree instance with the new config
+    handleResetTree(newConfig);
   };
 
   return (
