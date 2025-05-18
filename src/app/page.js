@@ -1,6 +1,11 @@
 "use client";
-
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -11,20 +16,19 @@ import {
   RotateCcw,
   Zap,
   HelpCircle,
+  Activity,
+  BarChart2,
 } from "lucide-react";
 
-// --- Constants ---
 const MEMTABLE_DEFAULT_MAX_SIZE = 5;
-const L0_DEFAULT_MAX_SSTABLES = 3; // Max SSTables in L0 before compacting to L1
-const LEVEL_MAX_SSTABLES_FACTOR = 4; // Ln can hold LEVEL_MAX_SSTABLES_FACTOR * L(n-1) max SSTables (approx)
-const SSTABLE_DEFAULT_MAX_ITEMS = 10; // Max items per SSTable after compaction
+const L0_DEFAULT_MAX_SSTABLES = 3;
+const LEVEL_MAX_SSTABLES_FACTOR = 4;
+const SSTABLE_DEFAULT_MAX_ITEMS = 10;
 const TOMBSTONE = "__DELETED__";
 
-// --- Utility Functions ---
 const generateSSTableId = () =>
   `sstable-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
 
-// Binary search for SSTable (assumes data is sorted by key)
 const sstableGet = (data, key) => {
   let low = 0;
   let high = data.length - 1;
@@ -35,33 +39,23 @@ const sstableGet = (data, key) => {
     } else if (data[mid][0] < key) {
       low = mid + 1;
     } else {
-      high = mid + 1; // Correction: should be high = mid - 1 for standard binary search
-      // However, for finding *any* instance or for range scans, this might be part of a different logic.
-      // For exact key match, it should be mid - 1. Let's assume it's intended for exact match.
       high = mid - 1;
     }
   }
-  return undefined; // Key not found
+  return undefined;
 };
-
-// --- LSM Tree Core Logic ---
 
 class MemTable {
   constructor(maxSize) {
     this.maxSize = maxSize;
-    this.data = new Map(); // Using Map for O(1) average time complexity for get/set
-    this.mutationOrder = []; // To maintain insertion order for flushing if keys are identical (though Map overwrites)
+    this.data = new Map();
+    this.mutationOrder = [];
   }
 
   put(key, value) {
     if (!this.data.has(key)) {
-      if (this.mutationOrder.length >= this.maxSize) {
-        // This check should ideally be before adding, to prevent exceeding maxSize.
-        // Or, isFull() should be checked before calling put by the LSMTree.
-      }
       this.mutationOrder.push(key);
     } else {
-      // Key already exists, update its position in mutationOrder for flushing recency
       this.mutationOrder = this.mutationOrder.filter((k) => k !== key);
       this.mutationOrder.push(key);
     }
@@ -82,13 +76,12 @@ class MemTable {
   }
 
   flush() {
-    // Sort data by key before flushing
     const sortedData = Array.from(this.data.entries()).sort((a, b) =>
       a[0].localeCompare(b[0])
     );
     this.data.clear();
     this.mutationOrder = [];
-    return sortedData; // Returns array of [key, value]
+    return sortedData;
   }
 
   getDataForViz() {
@@ -100,18 +93,14 @@ class MemTable {
 
 class SSTable {
   constructor(id, level, data = []) {
-    // data is an array of [key, value] sorted by key
     this.id = id;
     this.level = level;
-    this.data = data; // Data is expected to be sorted by key
+    this.data = data;
     this.minKey = data.length > 0 ? data[0][0] : null;
     this.maxKey = data.length > 0 ? data[data.length - 1][0] : null;
   }
 
   get(key) {
-    // Simple linear scan for this visualization, can be optimized with binary search
-    // const item = this.data.find(kv => kv[0] === key);
-    // return item ? item[1] : undefined;
     return sstableGet(this.data, key);
   }
 
@@ -124,7 +113,7 @@ class SSTable {
   }
 
   overlaps(minKey, maxKey) {
-    if (!this.minKey || !this.maxKey || !minKey || !maxKey) return false; // No overlap if any range is undefined
+    if (!this.minKey || !this.maxKey || !minKey || !maxKey) return false;
     return this.minKey <= maxKey && this.maxKey >= minKey;
   }
 }
@@ -136,20 +125,28 @@ class LSMTree {
       l0MaxSSTables: L0_DEFAULT_MAX_SSTABLES,
       levelMaxSSTablesFactor: LEVEL_MAX_SSTABLES_FACTOR,
       sstableMaxItems: SSTABLE_DEFAULT_MAX_ITEMS,
-      maxLevels: 5, // Max number of levels
+      maxLevels: 5,
       ...config,
     };
     this.memtable = new MemTable(this.config.memtableMaxSize);
     this.levels = Array(this.config.maxLevels)
       .fill(null)
-      .map(() => []); // L0, L1, ..., Ln
+      .map(() => []);
     this.log = [];
+    // NEW: Performance Metrics
+    this.metrics = {
+      logicalWrites: 0,
+      itemsWrittenToSSTables: 0, // Items actually written to "disk" (SSTable objects)
+      logicalReads: 0,
+      sstablesAccessedForRead: 0,
+      memtableLookupsForRead: 0,
+    };
     this._addLog("LSM Tree initialized.");
   }
 
   _addLog(message) {
     this.log.unshift({ text: message, time: new Date().toLocaleTimeString() });
-    if (this.log.length > 100) this.log.pop(); // Keep log size manageable
+    if (this.log.length > 100) this.log.pop();
   }
 
   put(key, value) {
@@ -160,24 +157,22 @@ class LSMTree {
     if (this.memtable.isFull()) {
       this._addLog("MemTable is full, attempting to flush first.");
       this.flushMemTable();
-      // After flush, if L0 needs compaction, it should be handled.
-      // The compaction check is usually done after adding the new SSTable to L0.
     }
-    // If still full after an attempted flush (e.g. compaction failed or didn't free space for L0)
     if (this.memtable.isFull()) {
       this._addLog(
-        "Write failed: MemTable is still full after attempting flush. Compaction might be needed or L0 is at capacity and cannot be compacted further."
+        "Write failed: MemTable is still full. Compaction might be needed or L0 is at capacity."
       );
       return;
     }
 
     const logMsg = this.memtable.put(key, value);
     this._addLog(logMsg);
+    this.metrics.logicalWrites++; // MODIFIED: Count logical write
 
     if (this.memtable.isFull()) {
       this.flushMemTable();
     }
-    this.triggerCompactionIfNeeded(); // Check all levels after a put that might have flushed.
+    this.triggerCompactionIfNeeded();
   }
 
   delete(key) {
@@ -197,6 +192,8 @@ class LSMTree {
     }
     const logMsg = this.memtable.delete(key);
     this._addLog(logMsg);
+    this.metrics.logicalWrites++; // MODIFIED: Count logical delete as a write
+
     if (this.memtable.isFull()) {
       this.flushMemTable();
     }
@@ -211,7 +208,10 @@ class LSMTree {
 
     let path = [];
     this._addLog(`Searching for key "${key}"...`);
+    this.metrics.logicalReads++; // MODIFIED: Count logical read
+
     path.push({ component: "MemTable", id: "memtable", status: "Checking" });
+    this.metrics.memtableLookupsForRead++; // MODIFIED: Count MemTable lookup
     let value = this.memtable.get(key);
     if (value !== undefined) {
       if (value === TOMBSTONE) {
@@ -227,9 +227,6 @@ class LSMTree {
 
     for (let i = 0; i < this.levels.length; i++) {
       const levelSSTables = this.levels[i];
-      // For L0, search newest to oldest (last element to first)
-      // For L1+, tables are non-overlapping, order doesn't strictly matter for correctness but can for perf.
-      // Here, we'll search in the order they are stored.
       const tablesToSearch =
         i === 0 ? [...levelSSTables].reverse() : levelSSTables;
 
@@ -239,6 +236,7 @@ class LSMTree {
           id: sstable.id,
           status: "Checking",
         });
+        this.metrics.sstablesAccessedForRead++; // MODIFIED: Count SSTable access
         value = sstable.get(key);
         if (value !== undefined) {
           if (value === TOMBSTONE) {
@@ -270,26 +268,25 @@ class LSMTree {
     this._addLog("MemTable is full or flush triggered. Flushing to L0...");
     const sstableData = this.memtable.flush();
     const newSSTable = new SSTable(generateSSTableId(), 0, sstableData);
-    this.levels[0].push(newSSTable); // Add to the end (newest)
+    this.levels[0].push(newSSTable);
     this._addLog(
       `Flushed MemTable to new SSTable ${newSSTable.id} in L0. Contains ${sstableData.length} items.`
     );
+    this.metrics.itemsWrittenToSSTables += sstableData.length; // MODIFIED: Count items written
   }
 
   triggerCompactionIfNeeded() {
-    // L0 to L1 compaction
     if (this.levels[0].length > this.config.l0MaxSSTables) {
       this.compact(0);
     }
-    // Higher level compactions
     for (let i = 0; i < this.config.maxLevels - 1; i++) {
       const maxSSTablesInLevel =
         i === 0
           ? this.config.l0MaxSSTables
           : this.config.l0MaxSSTables *
-            Math.pow(this.config.levelMaxSSTablesFactor, i); // Simplified sizing
+            Math.pow(this.config.levelMaxSSTablesFactor, i);
       if (this.levels[i].length > maxSSTablesInLevel) {
-        this.compact(i); // Compact this level to the next
+        this.compact(i);
       }
     }
   }
@@ -309,10 +306,8 @@ class LSMTree {
     let overlappingTablesInTargetLevel = [];
 
     if (levelToCompact === 0) {
-      // For L0, compact all SSTables in L0
       tablesToCompact = [...this.levels[0]];
-      this.levels[0] = []; // Clear L0
-      // Find all tables in L1 that overlap with ANY table from L0
+      this.levels[0] = [];
       for (const l0Table of tablesToCompact) {
         if (!l0Table.minKey || !l0Table.maxKey) continue;
         for (const l1Table of this.levels[targetLevel]) {
@@ -326,22 +321,18 @@ class LSMTree {
       }
       this._addLog(`Selected ${tablesToCompact.length} SSTables from L0.`);
     } else {
-      // For L1+ compactions, pick the oldest SSTable (FIFO - first one in the array)
-      // This is a simplification. Real systems might use other strategies (size-tiered, etc.)
       if (this.levels[levelToCompact].length === 0) {
         this._addLog(`L${levelToCompact} is empty. No compaction needed.`);
         return;
       }
-      tablesToCompact = [this.levels[levelToCompact].shift()]; // Remove oldest from current level
+      tablesToCompact = [this.levels[levelToCompact].shift()];
       const tableToCompact = tablesToCompact[0];
       if (!tableToCompact.minKey || !tableToCompact.maxKey) {
         this._addLog(
           `Skipping compaction for ${tableToCompact.id} as it has no key range (empty).`
         );
-        // Potentially add it back or handle empty tables. For now, it's removed.
         return;
       }
-      // Find overlapping tables in targetLevel
       for (const targetTable of this.levels[targetLevel]) {
         if (
           targetTable.overlaps(tableToCompact.minKey, tableToCompact.maxKey)
@@ -365,7 +356,6 @@ class LSMTree {
       `Found ${overlappingTablesInTargetLevel.length} overlapping SSTables in L${targetLevel}.`
     );
 
-    // Remove overlapping tables from targetLevel as they will be replaced by new merged tables
     this.levels[targetLevel] = this.levels[targetLevel].filter(
       (t) => !overlappingTablesInTargetLevel.find((ot) => ot.id === t.id)
     );
@@ -381,55 +371,26 @@ class LSMTree {
 
     this._addLog(`Merging ${allTablesToMerge.map((t) => t.id).join(", ")}.`);
 
-    // Merge sort logic
     let mergedDataMap = new Map();
-    // Process tables from higher levels (older data) first, then lower levels (newer data)
-    // Within L0, process older SSTables first (if IDs or timestamps allow such sorting)
-    // For simplicity, we rely on the order of tablesToCompact and overlappingTablesInTargetLevel
-    // and then the inherent order of items within each SSTable.
-    // The key is that when a key is encountered, the *last* value written for it (from the newest table) wins.
-
-    // To ensure newest wins: iterate tables from newest to oldest.
-    // L0 tables are generally newer than L1 tables.
-    // Within L0, if flushed sequentially, last table in `this.levels[0]` before clearing was newest.
-    // `tablesToCompact` for L0 contains them. If we want newest first for map setting:
     const sortedAllTablesToMerge = [...allTablesToMerge].sort((a, b) => {
-      if (a.level !== b.level) return a.level - b.level; // Lower level number (L0) is newer
-      // If same level, could use ID if it implies age. generateSSTableId uses Date.now().
-      // So numerically larger ID is newer. Sort descending by ID to process newer first.
+      if (a.level !== b.level) return a.level - b.level;
       return b.id.localeCompare(a.id);
     });
 
     for (const table of sortedAllTablesToMerge) {
       for (const [key, value] of table.getDataForViz()) {
-        // getDataForViz returns sorted array
         if (!mergedDataMap.has(key)) {
-          // Only set if not already set by a newer table
           mergedDataMap.set(key, value);
         }
       }
     }
 
-    // Filter out tombstones that have no corresponding older data
-    // This step is tricky. A tombstone should only be removed if it has "done its job"
-    // i.e., all older versions of the key in levels below the tombstone's original level are gone.
-    // For now, a simple approach: keep tombstones, they will naturally override older data.
-    // A more advanced compaction would remove a key entirely if its latest version is a tombstone
-    // AND there are no versions of this key in deeper levels.
-    // For this visualization, we'll keep tombstones to show they exist.
-    // They will be removed if a newer value for the same key is written.
-
     let finalMergedData = Array.from(mergedDataMap.entries()).sort((a, b) =>
       a[0].localeCompare(b[0])
     );
-    // Filter out tombstones ONLY IF there's no older version of the key in deeper levels.
-    // This is complex. For now, we keep all latest versions, including tombstones.
-    // A true major compaction would fully remove key if latest is tombstone and no older versions exist.
-    // We are doing a level-by-level merge, so tombstones propagate.
 
     this._addLog(`Merged data has ${finalMergedData.length} unique keys.`);
 
-    // Split merged data into new SSTables for the targetLevel
     for (
       let i = 0;
       i < finalMergedData.length;
@@ -442,10 +403,10 @@ class LSMTree {
         this._addLog(
           `Created new SSTable ${newSSTable.id} in L${targetLevel} with ${chunk.length} items.`
         );
+        this.metrics.itemsWrittenToSSTables += chunk.length; // MODIFIED: Count items written
       }
     }
 
-    // Sort SSTables in target level by minKey (important for L1+ for efficient range scans/overlap checks)
     if (targetLevel > 0) {
       this.levels[targetLevel].sort((a, b) => {
         if (a.minKey === null) return -1;
@@ -457,9 +418,24 @@ class LSMTree {
     this._addLog(
       `Compaction from L${levelToCompact} to L${targetLevel} complete.`
     );
-
-    // Potentially trigger further compaction if targetLevel is now too full
     this.triggerCompactionIfNeeded();
+  }
+
+  // NEW: Get performance metrics
+  getMetrics() {
+    const wa =
+      this.metrics.logicalWrites > 0
+        ? this.metrics.itemsWrittenToSSTables / this.metrics.logicalWrites
+        : 0;
+    const ra =
+      this.metrics.logicalReads > 0
+        ? this.metrics.sstablesAccessedForRead / this.metrics.logicalReads
+        : 0;
+    return {
+      ...this.metrics,
+      writeAmplification: wa.toFixed(2),
+      readAmplification: ra.toFixed(2),
+    };
   }
 
   getState() {
@@ -476,6 +452,7 @@ class LSMTree {
       ),
       log: [...this.log],
       config: { ...this.config },
+      metrics: this.getMetrics(), // MODIFIED: Include metrics in state
     };
   }
 
@@ -486,6 +463,14 @@ class LSMTree {
       .fill(null)
       .map(() => []);
     this.log = [];
+    // MODIFIED: Reset metrics
+    this.metrics = {
+      logicalWrites: 0,
+      itemsWrittenToSSTables: 0,
+      logicalReads: 0,
+      sstablesAccessedForRead: 0,
+      memtableLookupsForRead: 0,
+    };
     this._addLog("LSM Tree has been reset.");
   }
 }
@@ -502,7 +487,7 @@ const Tooltip = ({ text, children }) => {
     >
       {children}
       {visible && (
-        <div className="absolute z-10 bottom-full mb-2 left-1/2 transform -translate-x-1/2 px-3 py-2 text-sm font-medium text-white bg-gray-700 rounded-lg shadow-sm whitespace-nowrap">
+        <div className="absolute z-50 bottom-full mb-2 left-1/2 transform -translate-x-1/2 px-3 py-2 text-sm font-medium text-white bg-gray-700 rounded-lg shadow-sm whitespace-nowrap">
           {text}
         </div>
       )}
@@ -537,7 +522,7 @@ const SettingsPanel = ({ initialConfig, onSave, onResetDefault }) => {
       maxLevels: 5,
     };
     setConfig(defaultConfig);
-    onSave(defaultConfig); // Also save and apply
+    onSave(defaultConfig);
     setIsOpen(false);
   };
 
@@ -677,7 +662,6 @@ const Controls = ({
     <div className="p-4 bg-white shadow-md rounded-lg mb-6">
       <h2 className="text-xl font-semibold mb-4 text-gray-700">Controls</h2>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
-        {/* Write/Delete Section */}
         <div className="space-y-3 p-3 border border-gray-200 rounded-md bg-gray-50">
           <h3 className="font-medium text-gray-600">Write / Delete Data</h3>
           <div>
@@ -728,7 +712,6 @@ const Controls = ({
           </div>
         </div>
 
-        {/* Read Section */}
         <div className="space-y-3 p-3 border border-gray-200 rounded-md bg-gray-50">
           <h3 className="font-medium text-gray-600">Read Data</h3>
           <div>
@@ -755,7 +738,6 @@ const Controls = ({
           </button>
         </div>
       </div>
-      {/* Actions Section */}
       <div className="mt-4 pt-4 border-t border-gray-200 flex space-x-2">
         <button
           onClick={() => onCompact(0)}
@@ -775,26 +757,38 @@ const Controls = ({
   );
 };
 
-const DataItem = ({ itemKey, itemValue, isTombstone, highlight }) => (
-  <div
-    className={`px-2 py-1 border ${
-      isTombstone ? "border-red-400 bg-red-100" : "border-gray-300 bg-gray-100"
-    } rounded-md text-xs ${highlight ? "ring-2 ring-blue-500" : ""}`}
-  >
-    <span className="font-semibold text-blue-700">{itemKey}:</span>
-    <span
-      className={`${isTombstone ? "text-red-700 italic" : "text-gray-700"}`}
+// MODIFIED: DataItem for subtle animation
+const DataItem = ({ itemKey, itemValue, isTombstone, highlight }) => {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true); // Trigger animation on mount
+  }, []);
+
+  return (
+    <div
+      className={`px-2 py-1 border rounded-md text-xs transition-all duration-500 ease-in-out transform ${
+        mounted ? "opacity-100 scale-100" : "opacity-0 scale-90"
+      } ${
+        isTombstone
+          ? "border-red-400 bg-red-100"
+          : "border-gray-300 bg-gray-100"
+      } ${highlight ? "ring-2 ring-blue-500" : ""}`}
     >
-      {isTombstone ? " (TOMBSTONE)" : ` ${itemValue}`}
-    </span>
-  </div>
-);
+      <span className="font-semibold text-blue-700">{itemKey}:</span>
+      <span
+        className={`${isTombstone ? "text-red-700 italic" : "text-gray-700"}`}
+      >
+        {isTombstone ? " (TOMBSTONE)" : ` ${itemValue}`}
+      </span>
+    </div>
+  );
+};
 
 const MemTableVisualizer = ({ memtableData, maxSize, readPathItem }) => {
   const [isOpen, setIsOpen] = useState(true);
   return (
     <div
-      className={`p-4 border rounded-lg shadow-sm mb-4 ${
+      className={`p-4 border rounded-lg shadow-sm mb-4 transition-all duration-300 ${
         readPathItem?.status === "Checking"
           ? "ring-2 ring-yellow-400"
           : readPathItem?.status?.startsWith("Found")
@@ -835,7 +829,7 @@ const MemTableVisualizer = ({ memtableData, maxSize, readPathItem }) => {
           )}
           {memtableData.map(([key, value]) => (
             <DataItem
-              key={key}
+              key={`mem-${key}`}
               itemKey={key}
               itemValue={value}
               isTombstone={value === TOMBSTONE}
@@ -847,11 +841,19 @@ const MemTableVisualizer = ({ memtableData, maxSize, readPathItem }) => {
   );
 };
 
+// MODIFIED: SSTableVisualizer for subtle animation
 const SSTableVisualizer = ({ sstable, readPathItem }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
   return (
     <div
-      className={`p-3 border rounded-lg mb-2 shadow-sm relative ${
+      className={`p-3 border rounded-lg mb-2 shadow-sm relative transition-all duration-500 ease-in-out transform ${
+        mounted ? "opacity-100 scale-100" : "opacity-0 scale-95"
+      } ${
         readPathItem?.status === "Checking"
           ? "ring-2 ring-yellow-400"
           : readPathItem?.status?.startsWith("Found")
@@ -898,7 +900,7 @@ const SSTableVisualizer = ({ sstable, readPathItem }) => {
           )}
           {sstable.data.map(([key, value]) => (
             <DataItem
-              key={key}
+              key={`${sstable.id}-${key}`}
               itemKey={key}
               itemValue={value}
               isTombstone={value === TOMBSTONE}
@@ -915,9 +917,13 @@ const LevelVisualizer = ({ level, levelIdx, readPath }) => {
   const levelColor =
     levelIdx === 0
       ? "bg-purple-100 border-purple-300"
-      : `bg-indigo-${100 + levelIdx * 100} border-indigo-${
-          300 + levelIdx * 100
-        }`;
+      : levelIdx === 1
+      ? "bg-indigo-100 border-indigo-300"
+      : levelIdx === 2
+      ? "bg-sky-100 border-sky-300"
+      : levelIdx === 3
+      ? "bg-teal-100 border-teal-300"
+      : "bg-emerald-100 border-emerald-300"; // MODIFIED: Better color progression
 
   return (
     <div className={`p-3 border rounded-lg mb-3 shadow ${levelColor}`}>
@@ -952,8 +958,17 @@ const LevelVisualizer = ({ level, levelIdx, readPath }) => {
 
 const LogPanel = ({ logs }) => {
   const [isOpen, setIsOpen] = useState(true);
+  const logContainerRef = useRef(null);
+
+  useEffect(() => {
+    // Auto-scroll to top on new log
+    if (isOpen && logContainerRef.current) {
+      logContainerRef.current.scrollTop = 0;
+    }
+  }, [logs, isOpen]);
+
   return (
-    <div className="mt-6 bg-gray-800 text-white p-4 rounded-lg shadow-lg">
+    <div className="bg-gray-800 text-white p-4 rounded-lg shadow-lg">
       <button
         onClick={() => setIsOpen(!isOpen)}
         className="w-full text-left font-semibold text-gray-100 mb-2 flex items-center"
@@ -963,14 +978,99 @@ const LogPanel = ({ logs }) => {
         ) : (
           <ChevronRight size={20} className="mr-1" />
         )}
-        Activity Log
+        <Activity size={18} className="mr-2" /> Activity Log
       </button>
       {isOpen && (
-        <div className="h-48 overflow-y-auto space-y-1 text-sm font-mono">
+        <div
+          ref={logContainerRef}
+          className="h-60 overflow-y-auto space-y-1 text-sm font-mono border-t border-gray-700 pt-2"
+        >
           {logs.map((log, index) => (
             <div key={index} className="whitespace-pre-wrap">
               <span className="text-gray-400">{log.time}</span>:{" "}
               <span className="text-gray-200">{log.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// NEW: PerformanceMetrics Component
+const PerformanceMetrics = ({ metrics }) => {
+  const [isOpen, setIsOpen] = useState(true);
+
+  const metricItems = [
+    {
+      label: "Logical Writes",
+      value: metrics.logicalWrites,
+      tip: "Total 'put' or 'delete' operations initiated by the user.",
+    },
+    {
+      label: "Items Written to SSTables",
+      value: metrics.itemsWrittenToSSTables,
+      tip: "Total number of items written to SSTable files (during flush or compaction).",
+    },
+    {
+      label: "Write Amplification (WA)",
+      value: metrics.writeAmplification,
+      tip: "(Items Written to SSTables) / (Logical Writes). Measures how many times data is rewritten to disk.",
+    },
+    {
+      label: "Logical Reads",
+      value: metrics.logicalReads,
+      tip: "Total 'get' operations initiated by the user.",
+    },
+    {
+      label: "MemTable Lookups (Read)",
+      value: metrics.memtableLookupsForRead,
+      tip: "Number of times MemTable was checked during read operations.",
+    },
+    {
+      label: "SSTables Accessed (Read)",
+      value: metrics.sstablesAccessedForRead,
+      tip: "Total number of SSTables accessed during read operations.",
+    },
+    {
+      label: "Read Amplification (RA)",
+      value: metrics.readAmplification,
+      tip: "(SSTables Accessed) / (Logical Reads). Measures how many SSTables are checked per read.",
+    },
+  ];
+
+  return (
+    <div className="p-4 bg-white shadow-md rounded-lg mb-6">
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full text-left text-xl font-semibold text-gray-700 mb-3 flex items-center"
+      >
+        {isOpen ? (
+          <ChevronDown size={20} className="mr-2" />
+        ) : (
+          <ChevronRight size={20} className="mr-2" />
+        )}
+        <BarChart2 size={22} className="mr-2 text-indigo-600" /> Performance
+        Metrics
+      </button>
+      {isOpen && (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {metricItems.map((item) => (
+            <div
+              key={item.label}
+              className="p-3 bg-gray-50 border border-gray-200 rounded-md"
+            >
+              <div className="flex items-center justify-between">
+                <h4 className="text-sm font-medium text-gray-600">
+                  {item.label}
+                </h4>
+                <Tooltip text={item.tip}>
+                  <HelpCircle size={14} className="text-gray-400 cursor-help" />
+                </Tooltip>
+              </div>
+              <p className="text-2xl font-semibold text-indigo-600 mt-1">
+                {item.value}
+              </p>
             </div>
           ))}
         </div>
@@ -984,7 +1084,7 @@ const App = () => {
   const [treeState, setTreeState] = useState(lsmTreeInstance.getState());
   const [isCompacting, setIsCompacting] = useState(false);
   const [readValue, setReadValue] = useState(null);
-  const [readPath, setReadPath] = useState([]); // For highlighting search path
+  const [readPath, setReadPath] = useState([]);
 
   const updateState = useCallback(() => {
     setTreeState(lsmTreeInstance.getState());
@@ -1007,14 +1107,15 @@ const App = () => {
   const handleRead = (key) => {
     const result = lsmTreeInstance.get(key);
     setReadValue(result);
-    setReadPath(result.path || []); // Store the path
-    updateState(); // Logs will be updated
+    setReadPath(result.path || []);
+    updateState();
   };
 
   const handleCompact = async (level = 0) => {
-    // Make it async for potential future animation delays
     setIsCompacting(true);
-    lsmTreeInstance.compact(level); // Trigger compaction for a specific level
+    // Simulate async for visual feedback if needed, or for future complex animations
+    await new Promise((resolve) => setTimeout(resolve, 50)); // Small delay
+    lsmTreeInstance.compact(level);
     updateState();
     setIsCompacting(false);
     setReadValue(null);
@@ -1022,7 +1123,7 @@ const App = () => {
   };
 
   const handleResetTree = (newConfig) => {
-    const conf = newConfig || lsmTreeInstance.config; // Use current config if not overridden by settings save
+    const conf = newConfig || lsmTreeInstance.config;
     lsmTreeInstance.reset(conf);
     updateState();
     setReadValue(null);
@@ -1030,7 +1131,7 @@ const App = () => {
   };
 
   const handleSaveSettings = (newConfig) => {
-    lsmTreeInstance.reset(newConfig); // Reset with new config
+    lsmTreeInstance.reset(newConfig);
     updateState();
     setReadValue(null);
     setReadPath([]);
@@ -1049,7 +1150,9 @@ const App = () => {
 
   return (
     <div className="min-h-screen bg-gray-100 p-4 md:p-8 font-sans">
-      <div className="max-w-6xl mx-auto">
+      <div className="max-w-7xl mx-auto">
+        {" "}
+        {/* Increased max-width for better layout */}
         <header className="mb-8 text-center">
           <h1 className="text-4xl font-bold text-gray-800">
             LSM Tree Visualization
@@ -1058,24 +1161,25 @@ const App = () => {
             Watch how a Log-Structured Merge Tree works interactively.
           </p>
         </header>
-
         <SettingsPanel
           initialConfig={lsmTreeInstance.config}
           onSave={handleSaveSettings}
           onResetDefault={() => {
-            handleSaveSettings(initialLSMConfig); // Pass the default config object
+            handleSaveSettings(initialLSMConfig);
           }}
         />
-
         <Controls
           onWrite={handleWrite}
           onRead={handleRead}
           onDelete={handleDelete}
           onCompact={handleCompact}
-          onResetTree={() => handleResetTree()} // Simple reset without config change from button
+          onResetTree={() => handleResetTree()}
           isCompacting={isCompacting}
         />
-
+        {/* MODIFIED: Display Performance Metrics */}
+        {treeState.metrics && (
+          <PerformanceMetrics metrics={treeState.metrics} />
+        )}
         {readValue && (
           <div className="my-4 p-4 bg-yellow-50 border border-yellow-300 rounded-lg shadow">
             <h3 className="text-lg font-semibold text-yellow-800">
@@ -1099,9 +1203,8 @@ const App = () => {
             )}
           </div>
         )}
-
-        <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2">
+        <div className="mt-6 grid grid-cols-1 xl:grid-cols-3 gap-6">
+          <div className="xl:col-span-2">
             <h2 className="text-2xl font-semibold text-gray-700 mb-3">
               LSM Tree Structure
             </h2>
@@ -1119,16 +1222,15 @@ const App = () => {
               />
             ))}
           </div>
-          <div className="lg:col-span-1">
+          <div className="xl:col-span-1">
             <h2 className="text-2xl font-semibold text-gray-700 mb-3">
               Operations Log
             </h2>
             <LogPanel logs={treeState.log} />
           </div>
         </div>
-
-        <footer className="mt-12 text-center text-sm text-gray-500">
-          <p>LSM Tree Visualization vibe coded by Human</p>
+        <footer className="mt-12 text-center text-sm text-gray-500 py-6 border-t border-gray-200">
+          <p>LSM Tree Visualization. Built with React & Tailwind CSS.</p>
         </footer>
       </div>
     </div>
