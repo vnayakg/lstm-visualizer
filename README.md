@@ -42,4 +42,4 @@ npm run dev
 
 ## Live Demo
 
-Visit the live demo at: [https://vnayakg.github.io/lstm-visualizer](https://vnayakg.github.io/lstm-visualizer)
+Visit the live demo at: [https://vnayakg.github.io/lsm-tree-visualizer/](https://vnayakg.github.io/lsm-tree-visualizer/)
