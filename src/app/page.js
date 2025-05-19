@@ -32,11 +32,14 @@ const App = () => {
   );
 
   // Initialize persistence hook
-  const { loadPersistedState, saveState, clearPersistedState } = useLSMPersistence(initialLSMConfig);
+  const { loadPersistedState, saveState, clearPersistedState } =
+    useLSMPersistence(initialLSMConfig);
 
   // State initialization
   const [isClient, setIsClient] = useState(false);
-  const [lsmTreeInstance, setLsmTreeInstance] = useState(() => new LSMTree(initialLSMConfig));
+  const [lsmTreeInstance, setLsmTreeInstance] = useState(
+    () => new LSMTree(initialLSMConfig)
+  );
   const [treeState, setTreeState] = useState(() => lsmTreeInstance.getState());
   const [isCompacting, setIsCompacting] = useState(false);
   const [readValue, setReadValue] = useState(null);
@@ -47,7 +50,7 @@ const App = () => {
     if (!isClient) {
       setIsClient(true);
       const persistedState = loadPersistedState();
-      
+
       if (persistedState.config) {
         const newInstance = new LSMTree(persistedState.config);
         setLsmTreeInstance(newInstance);
@@ -67,7 +70,14 @@ const App = () => {
     if (isClient) {
       saveState(lsmTreeInstance.config, treeState, readValue, readPath);
     }
-  }, [treeState, readValue, readPath, lsmTreeInstance.config, saveState, isClient]);
+  }, [
+    treeState,
+    readValue,
+    readPath,
+    lsmTreeInstance.config,
+    saveState,
+    isClient,
+  ]);
 
   // Callback to update UI state from LSMTree instance
   const updateState = useCallback(() => {
@@ -211,7 +221,10 @@ const App = () => {
         </div>
 
         <footer className="mt-12 text-center text-sm text-gray-500 py-6 border-t border-gray-200">
-          <p>LSM Tree Visualization. Vibe coded with &#10084; by human</p>
+          <p>
+            LSM Tree Visualization. Vibe coded with &#10084; by{" "}
+            <a href="https://github.com/vnayakg"><u>human</u></a>
+          </p>
         </footer>
       </div>
       {/* Basic CSS for fadeIn animation if not using Tailwind's animation directly */}
