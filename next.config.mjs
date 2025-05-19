@@ -5,8 +5,8 @@ const nextConfig = {
   images: {
     unoptimized: true, // Disable default image optimization
   },
-  assetPrefix: isProd ? '/lstm-visualizer/' : '',
-  basePath: isProd ? '/lstm-visualizer' : '',
+  assetPrefix: isProd ? '/lsm-tree-visualizer/' : '',
+  basePath: isProd ? '/lsm-tree-visualizer' : '',
   output: 'export'
 };
 
